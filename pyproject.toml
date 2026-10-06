@@ -1,0 +1,81 @@
+[project]
+name = "inspect-multiturn"
+version = "0.1.0"
+description = "An Inspect extension for multi-turn evaluations"
+authors = [{ name = "Andy Schriner" }]
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+keywords = ["inspect", "inspect-ai", "evals", "llm", "multi-turn"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "inspect-ai>=0.3.200,<0.4",
+]
+
+[project.urls]
+"Source Code" = "https://github.com/aschriner/inspect_multiturn"
+"Issue Tracker" = "https://github.com/aschriner/inspect_multiturn/issues"
+"Changelog" = "https://github.com/aschriner/inspect_multiturn/blob/main/CHANGELOG.md"
+
+# Inspect discovers extensions through this entry point group and imports the
+# referenced module, which registers the package's tasks/solvers/scorers/etc.
+[project.entry-points.inspect_ai]
+inspect_multiturn = "inspect_multiturn._registry"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_multiturn"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "D",   # pydocstyle
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "D212",  # multi-line-summary-first-line
+]
+
+[tool.ruff.lint.per-file-ignores]
+# _registry.py exists only for its import side effects.
+"src/inspect_multiturn/_registry.py" = ["F401"]
+"tests/*" = ["D10"]  # undocumented-(public|magic)-*
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
