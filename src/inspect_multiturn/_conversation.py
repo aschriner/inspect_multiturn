@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 from inspect_ai.agent import Agent, as_solver
 from inspect_ai.model import ChatMessage, ChatMessageUser
@@ -13,13 +13,16 @@ from ._stop import StopCondition
 from ._types import ConversationState, Stop, TurnInfo, UserSimulator
 from .simulators import llm_user
 
+FirstTurn = Literal["auto", "dataset", "simulator"]
+
 
 @solver
 def converse(
-    target: Agent | None = None,
     user: UserSimulator | None = None,
+    *,
+    target: Agent | None = None,
     max_turns: int = 10,
-    first_turn: Literal["dataset", "simulator"] = "dataset",
+    first_turn: FirstTurn = "auto",
     stop_when: StopCondition | None = None,
 ) -> Solver:
     """Run a multi-turn conversation between a simulated user and the target.
@@ -40,32 +43,37 @@ def converse(
     turns, when `stop_when` returns `True`, or when an Inspect limit is hit.
 
     Args:
+        user: The user simulator. Defaults to `llm_user()`.
         target: Optional `@agent` to run as the target instead of `generate()`,
             e.g. a custom or bridged agent. It receives the transcript and should
             return after producing one turn's response.
-        user: The user simulator. Defaults to `llm_user()`.
         max_turns: Maximum number of turns, including a dataset-provided first turn.
-        first_turn: `"dataset"` uses the sample input as the first user message;
-            the input must end with a user message. `"simulator"` has the
-            simulator write the first message; the input must not end with a user
-            message (use an empty input, or only a system message).
+        first_turn: Who writes the first user message. `"auto"` decides per
+            sample: the sample input if it ends with a user message, otherwise
+            the simulator (e.g. for an empty input or only a system message).
+            `"dataset"` and `"simulator"` force one or the other, and raise if
+            the input doesn't match.
         stop_when: Optional check run after each target turn.
     """
     if max_turns < 1:
         raise ValueError(f"max_turns must be at least 1 (got {max_turns}).")
+    if first_turn not in get_args(FirstTurn):
+        raise ValueError(
+            f"first_turn must be one of {get_args(FirstTurn)} (got {first_turn!r})."
+        )
 
     user = user if user is not None else llm_user()
     # Either way the target is a solver that appends one turn's response.
     target_step = as_solver(target) if target is not None else generate()
 
     async def solve(state: TaskState, generate_fn: Generate) -> TaskState:
-        _check_first_turn(state, first_turn)
+        simulator_opens = _simulator_opens(state, first_turn)
         conv = state.store_as(ConversationState)
 
         try:
             for turn in range(max_turns):
                 async with span(f"turn {turn}", type="turn"):
-                    if turn > 0 or first_turn == "simulator":
+                    if turn > 0 or simulator_opens:
                         stop = await _user_turn(user, state, conv, turn)
                         if stop is not None:
                             conv.stop_reason = stop.reason
@@ -118,9 +126,8 @@ def _check_unmodified(state: TaskState, transcript: list[ChatMessage]) -> None:
         )
 
 
-def _check_first_turn(
-    state: TaskState, first_turn: Literal["dataset", "simulator"]
-) -> None:
+def _simulator_opens(state: TaskState, first_turn: FirstTurn) -> bool:
+    """Whether the simulator writes the first message, checking `first_turn`."""
     ends_with_user = bool(state.messages) and isinstance(
         state.messages[-1], ChatMessageUser
     )
@@ -135,3 +142,4 @@ def _check_first_turn(
             "user message (use an empty input, e.g. Sample(input=[]), or only a "
             'system message). Use first_turn="dataset" to open with the input.'
         )
+    return not ends_with_user

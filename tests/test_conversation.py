@@ -185,7 +185,7 @@ def test_custom_target_agent(run_solver):
         return execute
 
     sample = run_solver(
-        converse(echo_target(), scripted_user(["second"])),
+        converse(scripted_user(["second"]), target=echo_target()),
         Sample(input="first"),
     )
 
@@ -259,6 +259,34 @@ def test_first_turn_validation(run_solver, first_turn, sample_input, message):
     )
     assert sample.error is not None
     assert re.search(message, sample.error.message)
+
+
+@pytest.mark.parametrize(
+    ("sample_input", "opener"),
+    [
+        ("from dataset", "from dataset"),
+        ([], "from simulator"),
+        ([ChatMessageSystem(content="sys")], "from simulator"),
+    ],
+)
+def test_auto_first_turn(run_solver, sample_input, opener):
+    sample = run_solver(
+        converse(scripted_user(["from simulator"]), max_turns=1),
+        Sample(input=sample_input),
+    )
+    assert sample.error is None
+    [first_user] = [m for m in sample.messages if m.role == "user"]
+    assert first_user.text == opener
+
+
+def test_first_turn_must_be_known():
+    with pytest.raises(ValueError, match="first_turn"):
+        converse(scripted_user([]), first_turn="user")  # type: ignore[arg-type]
+
+
+def test_target_is_keyword_only():
+    with pytest.raises(TypeError):
+        converse(scripted_user([]), None)  # type: ignore[misc]
 
 
 def test_max_turns_must_be_positive():

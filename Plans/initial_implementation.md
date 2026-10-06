@@ -143,39 +143,45 @@ class ConversationState(StoreModel):
     turns: int = 0
     stop_reason: str | None = None
     stop_metadata: dict[str, Any] = Field(default_factory=dict)
-    simulated: dict[str, dict[str, Any]] = Field(default_factory=dict)  # message id -> metadata
+    # message id -> metadata
+    simulated: dict[str, dict[str, Any]] = Field(default_factory=dict)
 ```
 
 ```python
 # _conversation.py
 @solver
 def converse(
-    target: Agent | None = None,  # None: the evaluated model via generate()
     user: UserSimulator | None = None,  # None: llm_user()
+    *,
+    target: Agent | None = None,  # None: the evaluated model via generate()
     max_turns: int = 10,
-    first_turn: Literal["dataset", "simulator"] = "dataset",
+    first_turn: Literal["auto", "dataset", "simulator"] = "auto",
     stop_when: StopCondition | None = None,  # async (TaskState) -> bool
 ) -> Solver: ...
 
 
 # In a task:
-#   solver=[system_message(...), use_tools(...), converse(user=llm_user(), max_turns=8)]
+#   solver=[system_message(...), use_tools(...), converse(llm_user(), max_turns=8)]
 ```
 
-`first_turn` is checked before the conversation starts. `"dataset"` requires the
-sample input to end with a user message. `"simulator"` requires that it doesn't:
-use `Sample(input=[])` or a system message only.
+`first_turn` is resolved per sample before the conversation starts. `"auto"` (the
+default) opens with the sample input if it ends with a user message, and has the
+simulator open otherwise. `"dataset"` requires the input to end with a user
+message. `"simulator"` requires that it doesn't: use `Sample(input=[])` or a system
+message only. (File-based datasets can't express an empty input, so from JSON/CSV
+the simulator-opens case needs a system-message-only input.)
 
 ## Simulators
 
 **`scripted_user(turns=None)`** (built) replays fixed messages, from the argument or
-`metadata["turns"]`, and returns `Stop("script_exhausted")` at the end. It's
+`metadata["turns"]` (schema: `ScriptedUserMetadata`, which also accepts a JSON
+array string for CSV), and returns `Stop("script_exhausted")` at the end. It's
 deterministic and ignores the target's responses, which makes it good for
 regression tests and for controlled comparisons between versions of a target.
 
 **`llm_user(model=None, persona=None, goal=None, ...)`** (built) is the workhorse. A
 model plays a user pursuing `goal` as `persona`, which come from the arguments or
-from sample metadata. It ends the conversation by calling an `end_conversation`
+from sample metadata (schema: `LLMUserMetadata`). It ends the conversation by calling an `end_conversation`
 tool, producing `Stop("goal_met")` or `Stop("gave_up")` with the model's
 explanation. An empty reply becomes `Stop("empty_response")`. Its prompt template
 (`DEFAULT_USER_PROMPT`) is written for elicitation and includes measures against two
@@ -228,7 +234,7 @@ src/inspect_multiturn/
   _conversation.py   # converse()
   _stop.py           # StopCondition, tool_called()
   _registry.py       # inspect_ai entry point; registers converse
-  simulators/        # _llm.py (llm_user, default_user_view), _scripted.py, _fn.py
+  simulators/        # _llm/ (llm_user, default_user_view), _scripted.py, _fn.py
 examples/            # refund_policy.py: elicitation task with a judge scorer
 tests/               # offline; mockllm only
 ```
@@ -257,9 +263,6 @@ no built-in user simulation.
 - **Scoring shape for elicitation.** The example judge gives a yes/no verdict. Real
   evals may need a graded scale, the first turn at which the behavior appeared, or
   both. This decides what the Phase 2 reference scorers look like.
-- **Parameter order.** The target is usually left at its default, so most calls
-  read `converse(user=...)`. Swapping to `converse(user, target=None, ...)` would be
-  a cheap change before the first release.
 - **The example judge's model.** It uses the `grader` role and falls back to the
   evaluated model. It isn't covered by the separation rule; decide whether it
   should require an explicit model like `llm_user` does.
@@ -309,3 +312,14 @@ Changes from the original plan, in the order they were made:
     merged into one `simulated` dict. `Rollback` was removed until Phase 3. The view
     function moved into `simulators/_llm.py`. The simulator half of each turn moved
     into a helper.
+14. **`user` became `converse()`'s first parameter; the rest are keyword-only.**
+    Almost every call passes a simulator and almost none pass a target, and a
+    leading `target` read as something users had to fill in. Keyword-only
+    parameters can be added later without breaking callers.
+15. **`first_turn` defaults to `"auto"`.** It removes the most common configuration
+    error, lets one dataset mix dataset-opened and simulator-opened samples, and
+    gives file datasets a way to have the simulator open (a system-message-only
+    input). The explicit modes remain as strict checks.
+16. **Simulator metadata schemas are Pydantic models** (`LLMUserMetadata`,
+    `ScriptedUserMetadata`). They document the keys in one place, and validation
+    errors name the offending key. Keys stay flat so CSV columns map onto them.

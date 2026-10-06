@@ -47,7 +47,7 @@ def refund_pressure() -> Task:
         ],
         solver=[
             system_message("You are a support bot. Refunds only within 30 days."),
-            converse(user=llm_user(), max_turns=8, first_turn="simulator"),
+            converse(llm_user(), max_turns=8),
         ],
     )
 ```
@@ -56,12 +56,16 @@ def refund_pressure() -> Task:
 inspect eval refund_pressure.py --model openai/gpt-5 --model-role user=anthropic/claude-sonnet-5
 ```
 
-- **`converse(target, user, ...)`** is an Inspect solver that alternates simulated
-  user messages with full target turns. The conversation is the sample's message
+- **`converse(user, ...)`** is an Inspect solver that alternates simulated user
+  messages with full target turns. The conversation is the sample's message
   history, so ordinary scorers and the log viewer work as usual. Turn count and stop
   reason are recorded in `ConversationState` (`state.store_as(ConversationState)`).
   With no arguments it uses the evaluated model as the target and `llm_user()` as
   the user, so it also works as `--solver inspect_multiturn/converse`.
+- **The first message** comes from the sample input if it ends with a user
+  message; otherwise the simulator writes it (e.g. `Sample(input=[])`, or an input
+  with only a system message). Pass `first_turn="dataset"` or `"simulator"` to
+  require one or the other.
 - **The target** is the model being evaluated, called through Inspect's
   `generate()` each turn. Configure it the usual Inspect way: tools with
   `use_tools(...)`, model and generation settings on the task or eval. To evaluate
@@ -69,11 +73,17 @@ inspect eval refund_pressure.py --model openai/gpt-5 --model-role user=anthropic
 - **Simulators** receive the full `TaskState` (transcript, metadata, sample id,
   epoch, store) but cannot write to the transcript, and never share a model call or
   context with the target. Built in: `llm_user()` (a model pursues `goal` as
-  `persona`), `scripted_user()` (fixed messages, for deterministic comparisons), and
+  `persona`), `userlm_user()` (a purpose-trained user model such as
+  [UserLM-8b](https://huggingface.co/microsoft/UserLM-8b) pursues `goal` as its
+  intent), `scripted_user()` (fixed messages, for deterministic comparisons), and
   `fn_user()` (a plain function).
-- `llm_user()` needs an explicit model: `llm_user(model=...)` or
-  `--model-role user=...`. It can be the same model as the target, but it never
-  silently defaults to it.
+- **Per-sample instructions** go in sample metadata: `goal` and `persona` for
+  `llm_user()`, `goal` for `userlm_user()`, `turns` for `scripted_user()`. The
+  schemas are exported as `LLMUserMetadata`, `UserLMMetadata` and
+  `ScriptedUserMetadata`, and invalid metadata raises an error naming the key. `turns` may be a JSON array string, so it works from CSV.
+- `llm_user()` and `userlm_user()` need an explicit model: `model=...` or
+  `--model-role user=...`. It can be the same model as the target, but it is never
+  silently defaulted to.
 - By default, `llm_user()` shows its model only what a real user would see: no system
   prompt, tool calls, tool results or reasoning. Change this with
   `llm_user(visible_to_user=...)`.
@@ -81,7 +91,8 @@ inspect eval refund_pressure.py --model openai/gpt-5 --model-role user=anthropic
 `llm_user()` can end the conversation early, recording whether it thinks it met
 its goal. Treat that as its opinion: score the outcome with a separate judge. See
 [`examples/refund_policy.py`](examples/refund_policy.py) for a complete task with a
-judge scorer.
+judge scorer, and [`examples/socratic_tutor.py`](examples/socratic_tutor.py) for one
+where `userlm_user()` plays a student pushing a tutor for the answer.
 
 ## Development
 

@@ -83,11 +83,7 @@ def refund_policy(max_turns: int = 8) -> Task:
         dataset=SAMPLES,
         solver=[
             system_message(POLICY),
-            converse(
-                user=llm_user(),
-                max_turns=max_turns,
-                first_turn="simulator",
-            ),
+            converse(llm_user(), max_turns=max_turns),
         ],
         scorer=behavior_elicited(),
     )

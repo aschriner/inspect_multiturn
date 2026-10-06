@@ -12,7 +12,17 @@ from ._types import (
     UserMessage,
     UserSimulator,
 )
-from .simulators import ViewFn, default_user_view, fn_user, llm_user, scripted_user
+from .simulators import (
+    LLMUserMetadata,
+    ScriptedUserMetadata,
+    UserLMMetadata,
+    ViewFn,
+    default_user_view,
+    fn_user,
+    llm_user,
+    scripted_user,
+    userlm_user,
+)
 
 try:
     __version__ = version("inspect-multiturn")
@@ -21,10 +31,13 @@ except PackageNotFoundError:  # pragma: no cover - running from a source tree
 
 __all__ = [
     "ConversationState",
+    "LLMUserMetadata",
+    "ScriptedUserMetadata",
     "Stop",
     "StopCondition",
     "TurnInfo",
     "UserAction",
+    "UserLMMetadata",
     "UserMessage",
     "UserSimulator",
     "ViewFn",
@@ -35,4 +48,5 @@ __all__ = [
     "llm_user",
     "scripted_user",
     "tool_called",
+    "userlm_user",
 ]
