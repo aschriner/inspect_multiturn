@@ -21,9 +21,8 @@ from inspect_multiturn import (
     scripted_user,
     userlm_user,
 )
-from inspect_multiturn.simulators import _userlm
 from inspect_multiturn.simulators._llm import flip_roles
-from inspect_multiturn.simulators._userlm import render_userlm_prompt
+from inspect_multiturn.simulators._userlm import _template, render_userlm_prompt
 
 from .conftest import make_state, mock_model, text_output
 
@@ -260,7 +259,8 @@ def recording_model(*replies: str, seen: list | None = None):
     return mock_model(respond)
 
 
-async def test_userlm_user_sends_intent_and_unflipped_history():
+async def test_userlm_user_sends_intent_and_unflipped_history(monkeypatch):
+    monkeypatch.setattr(_template, "_api", lambda model: "hf")
     seen: list = []
     user = userlm_user(model=recording_model("  so can i get it back  ", seen=seen))
     state = make_state(
@@ -281,13 +281,108 @@ async def test_userlm_user_sends_intent_and_unflipped_history():
     ]
     assert call["tools"] == []
     assert call["config"].temperature == 1.0
-    assert call["config"].extra_body == {"add_generation_prompt": True}
+    assert call["config"].top_p == 0.8
+    assert call["config"].extra_body is None
+
+
+@pytest.mark.parametrize("api", ["vllm", "sglang"])
+async def test_userlm_user_opens_new_turn_on_servers_that_continue(monkeypatch, api):
+    monkeypatch.setattr(_template, "_api", lambda model: api)
+    seen: list = []
+    user = userlm_user(model=recording_model("so can i get it back", seen=seen))
+    state = make_state(
+        [ChatMessageAssistant(content="What's the order number?")],
+        metadata={"goal": "g"},
+    )
+    await user(state, turn())
+    assert seen[0]["config"].extra_body == {"add_generation_prompt": True}
+
+
+async def test_userlm_user_keeps_explicit_generation_prompt_setting(monkeypatch):
+    monkeypatch.setattr(_template, "_api", lambda model: "vllm")
+    seen: list = []
+    extra_body = {"continue_final_message": True}
+    user = userlm_user(
+        model=recording_model("so can i get it back", seen=seen),
+        goal="g",
+        config=GenerateConfig(extra_body=extra_body),
+    )
+    await user(make_state(), turn())
+    assert seen[0]["config"].extra_body == extra_body
+
+
+async def test_userlm_user_warns_on_generic_chat_endpoints(monkeypatch, caplog):
+    monkeypatch.setattr(_template, "_warned_chat_models", set())
+    model = recording_model("one two three", "four five six")
+    user = userlm_user(model=model, goal="g")
+    await user(make_state(), turn())
+    await user(make_state(), turn())
+    warnings = [r for r in caplog.records if "completions provider" in r.message]
+    assert len(warnings) == 1
 
 
 @pytest.mark.parametrize("reply", ["<|endconversation|>", "   "])
 async def test_userlm_user_end_token_stops(reply):
     user = userlm_user(model=recording_model(reply), goal="g")
     assert await user(make_state(), turn()) == Stop("end_conversation")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "so can i get it back<|eot_id|><|start_header_id|>assistant",
+        "so can i get it back<|start_header_id|>assistant<|end_header_id|>\nSure",
+        # The same, with the special tokens stripped by the provider.
+        "so can i get it backassistant\nSure, here's how",
+        "user\nso can i get it back",
+    ],
+)
+async def test_userlm_user_cuts_reply_at_turn_end(reply):
+    user = userlm_user(model=recording_model(reply), goal="g")
+    assert await user(make_state(), turn()) == UserMessage("so can i get it back")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "<|start_header_id|>assistant<|end_header_id|>\nSure, the answer is 288",
+        "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\nSure",
+        # The same, with the special tokens stripped by the provider.
+        "assistantSure, the answer is 288",
+        "\nassistant\nSure, the answer is 288",
+    ],
+)
+async def test_userlm_user_empty_turn_before_assistant_turn_stops(reply):
+    user = userlm_user(model=recording_model(reply), goal="g")
+    assert await user(make_state(), turn()) == Stop("end_conversation")
+
+
+async def test_userlm_user_leaves_role_words_in_ordinary_text():
+    reply = "userId is null in my systemPrompt code"
+    user = userlm_user(model=recording_model(reply), goal="g")
+    assert await user(make_state(), turn()) == UserMessage(reply)
+
+
+async def test_userlm_user_rejects_echoed_target_messages_and_intent():
+    user = userlm_user(
+        model=recording_model(
+            "What's the order  number?",
+            "You are a user who wants a refund.",
+            "its order 4417",
+        ),
+        goal="You are a user who wants a refund.",
+    )
+    state = make_state([ChatMessageAssistant(content="What's the order number?")])
+    action = await user(state, turn())
+    assert action == UserMessage(
+        "its order 4417",
+        {
+            "rejected": [
+                {"text": "What's the order  number?", "reason": "echoed"},
+                {"text": "You are a user who wants a refund.", "reason": "echoed"},
+            ]
+        },
+    )
 
 
 async def test_userlm_user_regenerates_rejected_drafts():
@@ -356,7 +451,7 @@ def test_render_userlm_prompt_matches_model_chat_template():
 
 
 async def test_userlm_user_sends_raw_prompt_to_completions_providers(monkeypatch):
-    monkeypatch.setattr(_userlm, "_uses_raw_prompt", lambda model: True)
+    monkeypatch.setattr(_template, "_api", lambda model: "openai-api-completions")
     seen: list = []
     user = userlm_user(model=recording_model("what about refunds", seen=seen))
     state = make_state(
@@ -374,7 +469,7 @@ async def test_userlm_user_sends_raw_prompt_to_completions_providers(monkeypatch
             ChatMessageAssistant(content="How can I help?"),
         ]
     )
-    assert call["config"].max_tokens == 1024
+    assert call["config"].max_tokens == 512
     assert call["config"].extra_body is None
 
 

@@ -25,7 +25,10 @@ the assistant's side):
         --model anthropic/claude-sonnet-5 \
         --model-role user=openai-api-completions/featherless/microsoft/UserLM-8b
 
-with `FEATHERLESS_BASE_URL` and `FEATHERLESS_API_KEY` set.
+with `FEATHERLESS_BASE_URL` and `FEATHERLESS_API_KEY` set. To go through the
+Hugging Face router instead, set `FEATHERLESS_BASE_URL` to
+`https://router.huggingface.co/featherless-ai/v1` and `FEATHERLESS_API_KEY` to a
+Hugging Face token.
 """
 
 import re

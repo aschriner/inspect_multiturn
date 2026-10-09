@@ -4,28 +4,22 @@ from typing import Any
 
 from inspect_ai.model import (
     CachePolicy,
-    ChatMessage,
     ChatMessageSystem,
-    ChatMessageUser,
     GenerateConfig,
     Model,
-    ModelName,
 )
 from inspect_ai.solver import TaskState
 from pydantic import BaseModel, Field
 
-from .._types import Stop, TurnInfo, UserAction, UserMessage
-from ._llm import ViewFn, default_user_view
-from ._metadata import read_metadata
-from ._model import resolve_user_model
-
-END_CONVERSATION_TOKEN = "<|endconversation|>"
+from ..._types import Stop, TurnInfo, UserAction, UserMessage
+from .._llm import ViewFn, default_user_view
+from .._metadata import read_metadata
+from .._model import resolve_user_model
+from ._parse import normalize, parse_draft
+from ._template import request
 
 # Sampling used for UserLM in the model card and paper.
 _DEFAULT_CONFIG = GenerateConfig(temperature=1.0, top_p=0.8)
-
-# Inspect's completions providers default to max_tokens=1 (for perplexity evals).
-_RAW_MAX_TOKENS = 1024
 
 
 class UserLMMetadata(BaseModel):
@@ -56,26 +50,39 @@ def userlm_user(
 
     [UserLM-8b](https://huggingface.co/microsoft/UserLM-8b) (Naous et al.,
     "Flipping the Dialogue", ICLR 2026) is trained to write the *user* side of a
-    conversation from a short intent, so it gets no role-play instructions and
-    no role flipping: it sees the intent as its system message, then the
-    conversation as-is, and writes the next user turn.
+    conversation from a short intent. It gets no role-play instructions and no
+    role flipping: its prompt is the intent as a system message followed by the
+    conversation as-is, and it writes the next user turn.
 
-    That only works if the model gets its own chat template, which opens a *user*
-    turn. `vllm/microsoft/UserLM-8b` and `hf/microsoft/UserLM-8b` load it from
-    the model repo. Hosted chat endpoints may instead apply a generic Llama 3
-    template that opens an *assistant* turn, so the model writes the target's
-    side (often with stray "user"/"assistant" header text). For those, use a
-    completions provider (`openai-api-completions/...` or `vllm-completions/...`):
-    with any provider whose name ends in `-completions`, the simulator renders
-    UserLM's template itself and sends the raw prompt.
+    That only works if the prompt is rendered with UserLM's own chat template,
+    which ends by opening a *user* turn:
+
+    - With a completions provider (any provider whose name ends in
+      `-completions`, e.g. `openai-api-completions/...` or
+      `vllm-completions/...`), the simulator renders the template itself and
+      sends the raw prompt. This is the reliable choice for hosted endpoints.
+    - `vllm/...`, `sglang/...` and `hf/...` load the template from the model
+      repo, so their chat APIs work too.
+    - Other chat endpoints typically apply a generic Llama 3 template that opens
+      an *assistant* turn, so UserLM writes the target's side of the
+      conversation. The simulator logs a warning when used this way.
 
     The model ends the conversation by emitting `<|endconversation|>`, which
     becomes `Stop("end_conversation")`. Most providers strip special tokens, so
     an empty response is treated the same way.
 
-    Drafts that fail the paper's guardrails (too short, too long, or a verbatim
-    repeat of an earlier user message) are regenerated, up to `max_retries`
-    times, after which the simulator returns `Stop("guardrails_exhausted")`.
+    Some providers don't stop at the end of UserLM's turn, so it goes on to
+    write the assistant's. The draft is cut at the turn boundary, which shows
+    up even with special tokens stripped (e.g. "can u just tell meassistant
+    Sure!"). A draft that starts with the assistant's turn (e.g. "assistantSure,
+    here's how...") means the user's turn was empty, which also ends the
+    conversation.
+
+    Drafts that fail the paper's guardrails are regenerated, up to `max_retries`
+    times, after which the simulator returns `Stop("guardrails_exhausted")`. A
+    draft is rejected if it is too short or too long, repeats one of the user's
+    earlier messages, or echoes one of the target's messages or the intent
+    (UserLM occasionally parrots its context instead of replying).
     Rejected drafts are recorded in the message's `"rejected"` metadata. The
     paper's token-level guardrails (blocking the first-token openers "I", "You"
     and "Here", or the end-of-conversation token) depend on provider logit-bias
@@ -96,26 +103,27 @@ def userlm_user(
             paper used 25 for its simulations.
         max_retries: Regenerations allowed per turn after the first draft.
         config: Generation config, merged over the defaults (`temperature=1.0`,
-            `top_p=0.8`, and `max_tokens=1024` for completions providers).
+            `top_p=0.8`, and `max_tokens=512` for completions providers).
         cache: Caching behavior for the first draft of each turn. Regenerations
             are never cached, so they can differ.
     """
     return _UserLMUser(
-        model,
-        goal,
-        prompt,
-        visible_to_user,
-        min_words,
-        max_words,
-        max_retries,
-        config,
-        cache,
+        model=model,
+        goal=goal,
+        prompt=prompt,
+        visible_to_user=visible_to_user,
+        min_words=min_words,
+        max_words=max_words,
+        max_retries=max_retries,
+        config=config,
+        cache=cache,
     )
 
 
 class _UserLMUser:
     def __init__(
         self,
+        *,
         model: str | Model | None,
         goal: str | None,
         prompt: str,
@@ -133,30 +141,22 @@ class _UserLMUser:
         self._min_words = min_words
         self._max_words = max_words
         self._max_retries = max_retries
-        self._chat_config = _chat_config(config)
-        self._raw_config = _raw_config(config)
+        self._config = _DEFAULT_CONFIG.merge(config) if config else _DEFAULT_CONFIG
         self._cache = cache
 
     async def __call__(self, state: TaskState, turn: TurnInfo) -> UserAction:
         model = resolve_user_model(
             self._model, "userlm_user", "vllm/microsoft/UserLM-8b"
         )
-        goal = self._resolve_metadata(state).goal
+        system = self._prompt.format(goal=self._resolve_metadata(state).goal)
         history = self._visible_to_user(state.messages)
-        messages: list[ChatMessage] = [
-            ChatMessageSystem(content=self._prompt.format(goal=goal)),
-            *history,
-        ]
-        if _uses_raw_prompt(model):
-            input: list[ChatMessage] = [
-                ChatMessageUser(content=render_userlm_prompt(messages))
-            ]
-            config = self._raw_config
-        else:
-            input, config = messages, self._chat_config
-        previous = {
-            _normalize(m.text) for m in history if isinstance(m, ChatMessageUser)
-        }
+        messages = [ChatMessageSystem(content=system), *history]
+        input, config = request(model, messages, self._config)
+
+        # Verbatim repeats to reject: the user's own earlier messages, and
+        # anything else in the prompt, which UserLM sometimes parrots back.
+        own = {normalize(m.text) for m in history if m.role == "user"}
+        echoes = {normalize(m.text) for m in messages if m.role != "user"}
 
         rejected: list[dict[str, str]] = []
         for attempt in range(self._max_retries + 1):
@@ -165,27 +165,28 @@ class _UserLMUser:
                 config=config,
                 cache=self._cache if attempt == 0 else False,
             )
-            text = output.message.text
-            if END_CONVERSATION_TOKEN in text or not text.strip():
-                final = text.split(END_CONVERSATION_TOKEN)[0].strip()
-                return Stop("end_conversation", {"text": final} if final else {})
+            text, ended = parse_draft(output.message.text)
+            if ended:
+                return Stop("end_conversation", {"text": text} if text else {})
 
-            text = text.strip()
-            reason = self._rejection(text, previous)
+            reason = self._rejection(text, own, echoes)
             if reason is None:
                 return UserMessage(text, {"rejected": rejected} if rejected else {})
             rejected.append({"text": text, "reason": reason})
 
         return Stop("guardrails_exhausted", {"rejected": rejected})
 
-    def _rejection(self, text: str, previous: set[str]) -> str | None:
+    def _rejection(self, text: str, own: set[str], echoes: set[str]) -> str | None:
         words = len(text.split())
         if self._min_words is not None and words < self._min_words:
             return "too_short"
         if self._max_words is not None and words > self._max_words:
             return "too_long"
-        if _normalize(text) in previous:
+        normalized = normalize(text)
+        if normalized in own:
             return "repeated"
+        if normalized in echoes:
+            return "echoed"
         return None
 
     def _resolve_metadata(self, state: TaskState) -> UserLMMetadata:
@@ -197,47 +198,3 @@ class _UserLMUser:
             metadata,
             'userlm_user() requires a goal: pass goal=... or set metadata["goal"].',
         )
-
-
-def render_userlm_prompt(messages: list[ChatMessage]) -> str:
-    """Render messages with UserLM-8b's chat template, ending on an open user turn.
-
-    Mirrors the template in the model repo (`chat_template.jinja`), for
-    endpoints that take a raw prompt.
-    """
-    turns = "".join(
-        f"<|start_header_id|>{m.role}<|end_header_id|>\n{m.text}<|eot_id|>"
-        for m in messages
-    )
-    return f"{turns}<|start_header_id|>user<|end_header_id|>"
-
-
-def _uses_raw_prompt(model: Model) -> bool:
-    # Completions providers send the prompt as-is, with no chat template.
-    return ModelName(model).api.endswith("-completions")
-
-
-def _merge_defaults(config: GenerateConfig | None) -> GenerateConfig:
-    return _DEFAULT_CONFIG.merge(config) if config else _DEFAULT_CONFIG.model_copy()
-
-
-def _raw_config(config: GenerateConfig | None) -> GenerateConfig:
-    merged = _merge_defaults(config)
-    if merged.max_tokens is None:
-        merged.max_tokens = _RAW_MAX_TOKENS
-    return merged
-
-
-def _chat_config(config: GenerateConfig | None) -> GenerateConfig:
-    merged = _merge_defaults(config)
-    # UserLM's transcript ends with the target's (assistant) reply. Inspect's vLLM
-    # provider would then continue that reply instead of starting a new turn
-    # unless add_generation_prompt is set; the chat template opens a user turn.
-    extra_body = dict(merged.extra_body or {})
-    if not {"add_generation_prompt", "continue_final_message"} & extra_body.keys():
-        extra_body["add_generation_prompt"] = True
-    return merged.merge(GenerateConfig(extra_body=extra_body))
-
-
-def _normalize(text: str) -> str:
-    return " ".join(text.lower().split())

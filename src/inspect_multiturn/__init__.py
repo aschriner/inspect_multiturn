@@ -13,12 +13,17 @@ from ._types import (
     UserSimulator,
 )
 from .simulators import (
+    CandidateSelector,
+    LLMSelectorMetadata,
     LLMUserMetadata,
     ScriptedUserMetadata,
+    Selection,
     UserLMMetadata,
     ViewFn,
+    best_of_n_user,
     default_user_view,
     fn_user,
+    llm_selector,
     llm_user,
     scripted_user,
     userlm_user,
@@ -30,9 +35,12 @@ except PackageNotFoundError:  # pragma: no cover - running from a source tree
     __version__ = "0.0.0"
 
 __all__ = [
+    "CandidateSelector",
     "ConversationState",
+    "LLMSelectorMetadata",
     "LLMUserMetadata",
     "ScriptedUserMetadata",
+    "Selection",
     "Stop",
     "StopCondition",
     "TurnInfo",
@@ -42,9 +50,11 @@ __all__ = [
     "UserSimulator",
     "ViewFn",
     "__version__",
+    "best_of_n_user",
     "converse",
     "default_user_view",
     "fn_user",
+    "llm_selector",
     "llm_user",
     "scripted_user",
     "tool_called",
